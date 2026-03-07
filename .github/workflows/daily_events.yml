@@ -24,7 +24,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.12"
-  OUTPUT_DIR: output
+  OUTPUT_DIR: events/output
 
 jobs:
   discover-events:
@@ -82,7 +82,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: k-boston-events-${{ github.run_id }}
-          path: output/
+          path: events/output/
           retention-days: 30
 
       # ── 6. Commit CSV back to repo (optional – uncomment to enable)
