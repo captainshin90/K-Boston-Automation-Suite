@@ -31,6 +31,8 @@ jobs:
     name: Discover & Enrich Events
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      issues: write
 
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────

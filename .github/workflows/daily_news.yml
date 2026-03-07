@@ -30,13 +30,15 @@ on:
 
 env:
   PYTHON_VERSION: "3.12"
-  OUTPUT_DIR: output
+  OUTPUT_DIR: news/output
 
 jobs:
   discover-news:
     name: Discover News & Videos
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      issues: write
 
     steps:
       - name: Checkout repository
@@ -86,7 +88,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: k-boston-news-${{ github.run_id }}
-          path: output/
+          path: news/output/
           retention-days: 14
 
       # ── Failure notification ──────────────────────────────────────
