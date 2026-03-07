@@ -3,7 +3,8 @@ name: K-Boston Daily News & Video Discovery
 on:
   schedule:
     # Runs every day at 7:00 AM Eastern (12:00 UTC)
-    - cron: "0 12 * * *"
+    # - cron: "0 12 * * *"
+    - cron: "0 12 * * 0"
   workflow_dispatch:
     inputs:
       days_back:
