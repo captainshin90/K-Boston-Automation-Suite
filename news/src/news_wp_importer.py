@@ -2,17 +2,13 @@
 """
 K-Boston News WordPress Importer
 Reads news-latest.json and pushes articles + videos to WordPress
-via the WP REST API as standard Posts (compatible with WP RSS Aggregator
-custom post types too).
+via the WP REST API as standard Posts.
 
-Articles are created as WordPress 'post' type with:
-  - Title, content, excerpt, featured image, categories, tags
-  - Source URL stored as custom meta (for "Read full article →" links)
+Articles → WordPress Posts with excerpt + "Read full article →" link
+Videos   → WordPress Posts with YouTube embed + thumbnail as featured image
 
-Videos are created as WordPress 'post' type with:
-  - YouTube embed as post content
-  - Thumbnail as featured image
-  - Custom meta for video_id, channel_name
+Duplicate detection uses WP post slug (derived from title), so re-running
+daily will skip already-imported items without needing custom meta fields.
 
 Env vars required:
   WP_SITE_URL       – https://k-boston.org
@@ -20,13 +16,14 @@ Env vars required:
   WP_APP_PASSWORD   – Application Password (WP 5.6+, Users → App Passwords)
 
 Optional:
-  WP_NEWS_CATEGORY  – slug of WP category to assign (default: "news")
+  WP_NEWS_CATEGORY  – slug of WP category to assign (default: "korean-news")
   WP_VIDEO_CATEGORY – slug of WP category for videos (default: "korean-videos")
   WP_POST_STATUS    – "publish" or "draft" (default: "publish")
-  SKIP_DUPLICATES   – "true" to skip posts whose source URL already exists (default: true)
+  SKIP_DUPLICATES   – "true" to skip already-imported items (default: true)
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -45,226 +42,248 @@ WP_PASS     = os.getenv("WP_APP_PASSWORD", "")
 POST_STATUS = os.getenv("WP_POST_STATUS", "publish")
 SKIP_DUPS   = os.getenv("SKIP_DUPLICATES", "true").lower() == "true"
 
-NEWS_CATEGORY  = os.getenv("WP_NEWS_CATEGORY",  "news")
+NEWS_CATEGORY  = os.getenv("WP_NEWS_CATEGORY",  "korean-news")
 VIDEO_CATEGORY = os.getenv("WP_VIDEO_CATEGORY", "korean-videos")
+
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; K-Boston/1.0; +https://k-boston.org)",
+    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+}
 
 
 # ─────────────────────────────────────────────
 # WP REST API Helpers
 # ─────────────────────────────────────────────
-def wp_auth() -> tuple:
+def auth():
     return (WP_USER, WP_PASS)
 
 
-def wp_get(endpoint: str, params: dict = None) -> dict:
+def wp_get(endpoint, params=None):
     r = requests.get(f"{WP_SITE}/wp-json/wp/v2/{endpoint}",
-                     auth=wp_auth(), params=params or {}, timeout=20)
+                     auth=auth(), params=params or {}, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
-def wp_post(endpoint: str, payload: dict) -> dict:
+def wp_post_req(endpoint, payload):
     r = requests.post(f"{WP_SITE}/wp-json/wp/v2/{endpoint}",
-                      auth=wp_auth(), json=payload, timeout=30)
-    r.raise_for_status()
+                      auth=auth(), json=payload, timeout=30)
+    if not r.ok:
+        try:
+            msg = r.json().get("message", r.text[:300])
+        except Exception:
+            msg = r.text[:300]
+        raise RuntimeError(f"HTTP {r.status_code}: {msg}")
     return r.json()
 
 
-def get_or_create_category(name: str, slug: str) -> int:
-    """Return WP category ID, creating it if needed."""
+def make_slug(title):
+    slug = title.lower().strip()
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug[:180]
+
+
+def post_exists_by_slug(slug):
+    if not SKIP_DUPS:
+        return False
+    try:
+        results = wp_get("posts", {"slug": slug, "per_page": 1})
+        return len(results) > 0
+    except Exception:
+        return False
+
+
+def get_or_create_category(name, slug):
     try:
         cats = wp_get("categories", {"slug": slug})
         if cats:
             return cats[0]["id"]
-        # Create
-        cat = wp_post("categories", {"name": name, "slug": slug})
+        cat = wp_post_req("categories", {"name": name, "slug": slug})
+        log.info(f"  Created category: {name} (ID {cat['id']})")
         return cat["id"]
     except Exception as exc:
-        log.warning(f"Category lookup failed ({name}): {exc}")
+        log.warning(f"  Category lookup/create failed ({name}): {exc}")
         return 0
 
 
-def get_or_create_tags(tag_csv: str) -> list[int]:
-    """Return list of WP tag IDs from comma-separated tag names."""
+def get_or_create_tags(tag_csv):
     if not tag_csv:
         return []
     ids = []
     for name in [t.strip() for t in tag_csv.split(",") if t.strip()]:
         try:
-            slug = name.lower().replace(" ", "-")
+            slug = re.sub(r"[\s_]+", "-", name.lower().strip())[:100]
             existing = wp_get("tags", {"slug": slug})
             if existing:
                 ids.append(existing[0]["id"])
             else:
-                tag = wp_post("tags", {"name": name, "slug": slug})
+                tag = wp_post_req("tags", {"name": name, "slug": slug})
                 ids.append(tag["id"])
         except Exception:
             pass
     return ids
 
 
-def sideload_image(image_url: str, title: str) -> int:
-    """Download remote image and upload to WP Media Library. Returns attachment ID."""
+def sideload_image(image_url, title):
+    """Download image from external URL and upload to WP Media Library."""
     if not image_url:
         return 0
     try:
-        resp = requests.get(image_url, timeout=15)
+        resp = requests.get(image_url, headers=IMAGE_HEADERS, timeout=15)
         resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
         ext = {"image/jpeg": "jpg", "image/png": "png",
                "image/webp": "webp", "image/gif": "gif"}.get(content_type, "jpg")
-        filename = f"k-boston-{title[:40].replace(' ', '-').lower()}.{ext}"
-
+        safe = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50].strip("-")
+        filename = f"k-boston-{safe}.{ext}"
         r = requests.post(
             f"{WP_SITE}/wp-json/wp/v2/media",
-            auth=wp_auth(),
+            auth=auth(),
             headers={"Content-Disposition": f'attachment; filename="{filename}"',
                      "Content-Type": content_type},
             data=resp.content,
             timeout=30,
         )
         r.raise_for_status()
-        return r.json().get("id", 0)
+        media_id = r.json().get("id", 0)
+        log.info(f"    🖼  Image sideloaded → WP media ID {media_id}")
+        return media_id
     except Exception as exc:
-        log.warning(f"Image sideload failed ({image_url}): {exc}")
+        log.warning(f"    Image sideload skipped: {exc}")
         return 0
 
 
-def post_exists(source_url: str) -> bool:
-    """Check if a post with this source URL meta already exists."""
-    if not SKIP_DUPS or not source_url:
-        return False
+def parse_date(published):
+    if not published:
+        return ""
     try:
-        results = wp_get("posts", {"meta_key": "k_boston_source_url",
-                                    "meta_value": source_url, "per_page": 1})
-        return len(results) > 0
+        dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        return dt.astimezone(EASTERN).strftime("%Y-%m-%dT%H:%M:%S")
     except Exception:
-        return False
+        return published[:19]
 
 
 # ─────────────────────────────────────────────
 # Article importer
 # ─────────────────────────────────────────────
-def import_article(item: dict, news_cat_id: int) -> bool:
-    source_url = item.get("url", "")
-    title      = item.get("title", "").strip()
+def import_article(item, news_cat_id):
+    title = item.get("title", "").strip()
     if not title:
         return False
 
-    if post_exists(source_url):
-        log.info(f"  ↩ Skip (exists): {title[:60]}")
+    slug = make_slug(title)
+    if post_exists_by_slug(slug):
+        log.info(f"  ↩ Skip (exists): {title[:70]}")
         return False
 
-    # Build content: excerpt + "Read full article" link
+    source_url  = item.get("url", "")
+    source_name = item.get("source_name", "")
     excerpt     = item.get("excerpt") or item.get("description", "")
     content_txt = item.get("content") or item.get("description", "")
-    source_name = item.get("source_name", "")
-    published   = item.get("published_at", "")
 
-    content_html = f"""<div class="k-boston-article-excerpt">
-<p>{excerpt or content_txt[:400]}</p>
-<p><a href="{source_url}" target="_blank" rel="noopener noreferrer" class="k-boston-read-more">
-  Read full article at {source_name} →
-</a></p>
-</div>"""
+    content_html = (
+        f'<div class="k-boston-article-excerpt">'
+        f"<p>{excerpt or content_txt[:400]}</p>"
+        f'<p><a href="{source_url}" target="_blank" rel="noopener noreferrer" '
+        f'class="k-boston-read-more">Read full article at {source_name} →</a></p>'
+        f"</div>"
+    )
 
-    # Featured image
     image_id = sideload_image(item.get("image_url", ""), title)
-
-    tag_ids = get_or_create_tags(item.get("tags", ""))
+    tag_ids  = get_or_create_tags(item.get("tags", ""))
 
     payload = {
-        "title":          title,
-        "content":        content_html,
-        "excerpt":        excerpt[:200] if excerpt else "",
-        "status":         POST_STATUS,
-        "date":           published[:19] if published else datetime.now(EASTERN).isoformat()[:19],
-        "categories":     [news_cat_id] if news_cat_id else [],
-        "tags":           tag_ids,
-        "meta": {
-            "k_boston_source_url":  source_url,
-            "k_boston_source_name": source_name,
-            "k_boston_author":      item.get("author", ""),
-            "k_boston_kind":        "article",
-        },
+        "title":      title,
+        "slug":       slug,
+        "content":    content_html,
+        "excerpt":    (excerpt or "")[:200],
+        "status":     POST_STATUS,
+        "categories": [news_cat_id] if news_cat_id else [],
+        "tags":       tag_ids,
     }
+    date_str = parse_date(item.get("published_at", ""))
+    if date_str:
+        payload["date"] = date_str
     if image_id:
         payload["featured_media"] = image_id
 
     try:
-        result = wp_post("posts", payload)
-        log.info(f"  ✓ Article: {title[:60]} (ID {result.get('id')})")
+        result = wp_post_req("posts", payload)
+        log.info(f"  ✓ Article: {title[:70]} (WP ID {result.get('id')})")
         return True
     except Exception as exc:
-        log.error(f"  ✗ Article failed: {title[:60]} – {exc}")
+        log.error(f"  ✗ Article failed: {title[:70]} — {exc}")
         return False
 
 
 # ─────────────────────────────────────────────
 # Video importer
 # ─────────────────────────────────────────────
-def import_video(item: dict, video_cat_id: int) -> bool:
-    video_id = item.get("video_id", "")
+def import_video(item, video_cat_id):
     title    = item.get("title", "").strip()
+    video_id = item.get("video_id", "")
     if not title or not video_id:
         return False
 
-    source_url = f"https://www.youtube.com/watch?v={video_id}"
-    if post_exists(source_url):
-        log.info(f"  ↩ Skip (exists): {title[:60]}")
+    slug = make_slug(title)
+    if post_exists_by_slug(slug):
+        log.info(f"  ↩ Skip (exists): {title[:70]}")
         return False
 
-    channel  = item.get("channel_name", "")
-    desc     = item.get("description", "")
-    excerpt  = item.get("excerpt") or desc[:200]
-    published = item.get("published_at", "")
+    channel    = item.get("channel_name", "")
+    channel_id = item.get("channel_id", "")
+    desc       = item.get("description", "")
+    excerpt    = item.get("excerpt") or desc[:200]
+    source_url = f"https://www.youtube.com/watch?v={video_id}"
 
     embed_html = (
-        item.get("embed_html")
-        or f'<div class="k-boston-video-embed" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;">'
-           f'<iframe src="https://www.youtube.com/embed/{video_id}" '
-           f'style="position:absolute;top:0;left:0;width:100%;height:100%;" '
-           f'frameborder="0" allowfullscreen></iframe></div>'
+        f'<div class="k-boston-video-embed" style="position:relative;'
+        f'padding-bottom:56.25%;height:0;overflow:hidden;">'
+        f'<iframe src="https://www.youtube.com/embed/{video_id}" '
+        f'style="position:absolute;top:0;left:0;width:100%;height:100%;" '
+        f'frameborder="0" allowfullscreen loading="lazy"></iframe></div>'
     )
-
-    content_html = f"""{embed_html}
-<div class="k-boston-video-meta">
-<p>{excerpt}</p>
-<p><strong>Channel:</strong> <a href="https://www.youtube.com/channel/{item.get('channel_id','')}"
-   target="_blank" rel="noopener noreferrer">{channel}</a></p>
-<p><a href="{source_url}" target="_blank" rel="noopener noreferrer" class="k-boston-read-more">
-  Watch on YouTube →
-</a></p>
-</div>"""
+    channel_link = (
+        f'<a href="https://www.youtube.com/channel/{channel_id}" '
+        f'target="_blank" rel="noopener noreferrer">{channel}</a>'
+        if channel_id else channel
+    )
+    content_html = (
+        f"{embed_html}"
+        f'<div class="k-boston-video-meta">'
+        f"<p>{excerpt}</p>"
+        f"<p><strong>Channel:</strong> {channel_link}</p>"
+        f'<p><a href="{source_url}" target="_blank" rel="noopener noreferrer" '
+        f'class="k-boston-read-more">Watch on YouTube →</a></p>'
+        f"</div>"
+    )
 
     image_id = sideload_image(item.get("thumbnail_url", ""), title)
     tag_ids  = get_or_create_tags(item.get("tags", ""))
 
     payload = {
         "title":      title,
+        "slug":       slug,
         "content":    content_html,
         "excerpt":    excerpt[:200],
         "status":     POST_STATUS,
-        "date":       published[:19] if published else datetime.now(EASTERN).isoformat()[:19],
         "categories": [video_cat_id] if video_cat_id else [],
         "tags":       tag_ids,
-        "meta": {
-            "k_boston_source_url":  source_url,
-            "k_boston_source_name": channel,
-            "k_boston_video_id":    video_id,
-            "k_boston_channel":     channel,
-            "k_boston_kind":        "video",
-        },
     }
+    date_str = parse_date(item.get("published_at", ""))
+    if date_str:
+        payload["date"] = date_str
     if image_id:
         payload["featured_media"] = image_id
 
     try:
-        result = wp_post("posts", payload)
-        log.info(f"  ✓ Video: {title[:60]} (ID {result.get('id')})")
+        result = wp_post_req("posts", payload)
+        log.info(f"  ✓ Video: {title[:70]} (WP ID {result.get('id')})")
         return True
     except Exception as exc:
-        log.error(f"  ✗ Video failed: {title[:60]} – {exc}")
+        log.error(f"  ✗ Video failed: {title[:70]} — {exc}")
         return False
 
 
@@ -274,11 +293,12 @@ def import_video(item: dict, video_cat_id: int) -> bool:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Import K-Boston news & videos to WordPress")
-    parser.add_argument("--json", default="output/news-latest.json", help="JSON file path")
-    parser.add_argument("--dry-run", action="store_true", help="Parse JSON but don't call WP API")
+    parser.add_argument("--json", default="news/output/news-latest.json", help="JSON file path")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be imported without touching WordPress")
     args = parser.parse_args()
 
-    if not all([WP_SITE, WP_USER, WP_PASS]):
+    if not args.dry_run and not all([WP_SITE, WP_USER, WP_PASS]):
         log.error("WP_SITE_URL, WP_USERNAME, WP_APP_PASSWORD are required")
         raise SystemExit(1)
 
@@ -290,37 +310,41 @@ def main():
     log.info(f"Loaded {len(articles)} articles, {len(videos)} videos from {args.json}")
 
     if args.dry_run:
-        log.info("DRY RUN – showing titles only:")
+        log.info("── DRY RUN – nothing will be written to WordPress ──")
         for a in articles:
-            log.info(f"  [article] {a.get('title','')[:70]}")
+            log.info(f"  [article] {a.get('title','')[:80]}")
         for v in videos:
-            log.info(f"  [video]   {v.get('title','')[:70]}")
+            log.info(f"  [video]   {v.get('title','')[:80]}")
         return
 
-    # Get/create WP categories
     news_cat_id  = get_or_create_category("Korean News",   NEWS_CATEGORY)
     video_cat_id = get_or_create_category("Korean Videos", VIDEO_CATEGORY)
 
-    ok_a = fail_a = ok_v = fail_v = 0
-
-    log.info(f"Importing {len(articles)} articles...")
+    log.info(f"── Importing {len(articles)} articles ──")
+    ok_a = fail_a = 0
     for item in articles:
         if import_article(item, news_cat_id):
             ok_a += 1
         else:
             fail_a += 1
-        time.sleep(0.5)
+        time.sleep(0.4)
 
-    log.info(f"Importing {len(videos)} videos...")
+    log.info(f"── Importing {len(videos)} videos ──")
+    ok_v = fail_v = 0
     for item in videos:
         if import_video(item, video_cat_id):
             ok_v += 1
         else:
             fail_v += 1
-        time.sleep(0.5)
+        time.sleep(0.4)
 
-    log.info(f"Done — Articles: {ok_a} imported, {fail_a} skipped/failed")
-    log.info(f"       Videos:   {ok_v} imported, {fail_v} skipped/failed")
+    log.info("══════════════════════════════════════════")
+    log.info(f"Articles : {ok_a} imported, {fail_a} skipped/failed")
+    log.info(f"Videos   : {ok_v} imported, {fail_v} skipped/failed")
+    log.info(f"Find them at: {WP_SITE}/blog/")
+    log.info(f"  Korean News  → {WP_SITE}/category/{NEWS_CATEGORY}/")
+    log.info(f"  Korean Videos → {WP_SITE}/category/{VIDEO_CATEGORY}/")
+    log.info("══════════════════════════════════════════")
 
 
 if __name__ == "__main__":
