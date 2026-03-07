@@ -1,0 +1,103 @@
+name: K-Boston Daily News & Video Discovery
+
+on:
+  schedule:
+    # Runs every day at 7:00 AM Eastern (12:00 UTC)
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      days_back:
+        description: "Days back to collect news (default: 3)"
+        default: "3"
+        required: false
+      relevance_threshold:
+        description: "Min AI relevance score 0-100 (default: 45)"
+        default: "45"
+        required: false
+      post_status:
+        description: "WordPress post status"
+        default: "publish"
+        required: false
+        type: choice
+        options: [publish, draft]
+      dry_run:
+        description: "Dry run (discover but don't import to WordPress)"
+        default: "false"
+        required: false
+        type: choice
+        options: ["false", "true"]
+
+env:
+  PYTHON_VERSION: "3.12"
+  OUTPUT_DIR: output
+
+jobs:
+  discover-news:
+    name: Discover News & Videos
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Discover ─────────────────────────────────────────────────
+      - name: Run news & video discovery
+        env:
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          NEWSAPI_KEY:         ${{ secrets.NEWSAPI_KEY }}
+          SERPAPI_KEY:         ${{ secrets.SERPAPI_KEY }}
+          YOUTUBE_API_KEY:     ${{ secrets.YOUTUBE_API_KEY }}
+          DAYS_BACK:           ${{ github.event.inputs.days_back || '3' }}
+          RELEVANCE_THRESHOLD: ${{ github.event.inputs.relevance_threshold || '45' }}
+          OUTPUT_DIR:          ${{ env.OUTPUT_DIR }}
+        run: python src/news_discovery.py
+
+      # ── Import to WordPress ───────────────────────────────────────
+      - name: Import to WordPress
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          WP_SITE_URL:       ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME:       ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD:   ${{ secrets.WP_APP_PASSWORD }}
+          WP_POST_STATUS:    ${{ github.event.inputs.post_status || 'publish' }}
+          WP_NEWS_CATEGORY:  "news"
+          WP_VIDEO_CATEGORY: "korean-videos"
+          SKIP_DUPLICATES:   "true"
+        run: python src/news_wp_importer.py --json output/news-latest.json
+
+      - name: Dry run preview
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: python src/news_wp_importer.py --json output/news-latest.json --dry-run
+
+      # ── Archive artifacts ─────────────────────────────────────────
+      - name: Upload news JSON artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k-boston-news-${{ github.run_id }}
+          path: output/
+          retention-days: 14
+
+      # ── Failure notification ──────────────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `News discovery failed – ${new Date().toISOString().slice(0,10)}`,
+              body: `Workflow run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) failed.`,
+              labels: ['bug', 'automated']
+            })
