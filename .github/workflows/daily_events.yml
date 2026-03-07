@@ -44,7 +44,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r events/requirements.txt
 
       # ── 3. Run event discovery ───────────────────────────────────
       - name: Run event discovery
@@ -58,7 +58,7 @@ jobs:
           DAYS_AHEAD:           ${{ github.event.inputs.days_ahead || '60' }}
           RELEVANCE_THRESHOLD:  ${{ github.event.inputs.relevance_threshold || '40' }}
           OUTPUT_DIR:           ${{ env.OUTPUT_DIR }}
-        run: python src/event_discovery.py
+        run: python events/src/event_discovery.py
 
       # ── 4. Import to WordPress ───────────────────────────────────
       - name: Import events to WordPress
@@ -73,7 +73,7 @@ jobs:
           FTP_REMOTE_PATH:   ${{ secrets.FTP_REMOTE_PATH }}
         run: |
           METHOD="${{ github.event.inputs.import_method || 'rest' }}"
-          python src/wp_importer.py --csv output/k-boston-events-latest.csv --method "$METHOD"
+          python events/src/wp_importer.py --csv events/output/k-boston-events-latest.csv --method "$METHOD"
 
       # ── 5. Upload CSV artifact (always) ──────────────────────────
       - name: Upload events CSV as artifact

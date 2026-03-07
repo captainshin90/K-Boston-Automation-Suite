@@ -48,7 +48,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r news/requirements.txt
 
       # ── Discover ─────────────────────────────────────────────────
       - name: Run news & video discovery
@@ -60,7 +60,7 @@ jobs:
           DAYS_BACK:           ${{ github.event.inputs.days_back || '3' }}
           RELEVANCE_THRESHOLD: ${{ github.event.inputs.relevance_threshold || '45' }}
           OUTPUT_DIR:          ${{ env.OUTPUT_DIR }}
-        run: python src/news_discovery.py
+        run: python news/src/news_discovery.py
 
       # ── Import to WordPress ───────────────────────────────────────
       - name: Import to WordPress
@@ -73,11 +73,11 @@ jobs:
           WP_NEWS_CATEGORY:  "news"
           WP_VIDEO_CATEGORY: "korean-videos"
           SKIP_DUPLICATES:   "true"
-        run: python src/news_wp_importer.py --json output/news-latest.json
+        run: python news/src/news_wp_importer.py --json news/output/news-latest.json
 
       - name: Dry run preview
         if: ${{ github.event.inputs.dry_run == 'true' }}
-        run: python src/news_wp_importer.py --json output/news-latest.json --dry-run
+        run: python news/src/news_wp_importer.py --json news/output/news-latest.json --dry-run
 
       # ── Archive artifacts ─────────────────────────────────────────
       - name: Upload news JSON artifacts
