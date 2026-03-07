@@ -14,6 +14,7 @@ Set env vars:
 """
 
 import os
+import re
 import csv
 import json
 import logging
@@ -34,13 +35,59 @@ WP_PASS     = os.getenv("WP_APP_PASSWORD", "")
 TEC_DATE_FMT = "%Y-%m-%d"
 TEC_TIME_FMT = "%H:%M:%S"
 
+# Browser-like headers to fetch images from CDNs with hotlink protection
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; K-Boston/1.0; +https://k-boston.org)",
+    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+    "Referer": "https://www.eventbrite.com/",
+}
+
 
 def load_csv(path: str) -> list[dict]:
     with open(path, encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-def row_to_tec_payload(row: dict) -> dict:
+def sideload_image(image_url: str, title: str, auth: tuple) -> int:
+    """
+    Download image from external URL and upload to WP Media Library.
+    Returns the WordPress attachment ID, or 0 on failure.
+    External CDNs (Eventbrite, Ticketmaster) block hotlinking, so we
+    download the image server-side and re-host it in WordPress.
+    """
+    if not image_url:
+        return 0
+    try:
+        resp = requests.get(image_url, headers=IMAGE_HEADERS, timeout=15)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        ext = {"image/jpeg": "jpg", "image/png": "png",
+               "image/webp": "webp", "image/gif": "gif"}.get(content_type, "jpg")
+
+        safe_title = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50].strip("-")
+        filename = f"k-boston-event-{safe_title}.{ext}"
+
+        r = requests.post(
+            f"{WP_SITE}/wp-json/wp/v2/media",
+            auth=auth,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": content_type,
+            },
+            data=resp.content,
+            timeout=30,
+        )
+        r.raise_for_status()
+        media_id = r.json().get("id", 0)
+        log.info(f"  🖼  Sideloaded image → WP media ID {media_id}")
+        return media_id
+    except Exception as exc:
+        log.warning(f"  Image sideload failed ({image_url[:80]}…): {exc}")
+        return 0
+
+
+def row_to_tec_payload(row: dict, image_id: int = 0) -> dict:
     """Convert CSV row → The Events Calendar REST API payload."""
     def combine_dt(date_str, time_str):
         if not date_str:
@@ -65,7 +112,6 @@ def row_to_tec_payload(row: dict) -> dict:
         "timezone":    row.get("Timezone", "America/New_York"),
         "cost":        row.get("Event Cost", ""),
         "url":         row.get("Event Website", ""),
-        "image":       row.get("Event Featured Image", ""),
         "status":      "publish",
         "venue": {
             "venue":    row.get("Venue Name", ""),
@@ -86,12 +132,22 @@ def row_to_tec_payload(row: dict) -> dict:
         "categories": [{"name": c.strip()} for c in row.get("Event Category", "").split(",") if c.strip()],
         "tags":        [{"name": t.strip()} for t in row.get("Event Tags", "").split(",") if t.strip()],
     }
+
+    # Use the sideloaded WP media ID if available; TEC also accepts a raw URL
+    # as fallback but CDN hotlink protection will block it on the front end.
+    if image_id:
+        payload["image"] = image_id          # preferred: local WP attachment ID
+    elif row.get("Event Featured Image"):
+        payload["image"] = row["Event Featured Image"]   # fallback
+
     return payload
 
 
 def import_via_rest_api(csv_path: str) -> tuple[int, int]:
     """
     Push events one-by-one via The Events Calendar REST API.
+    Downloads and sideloads each event image into the WP Media Library
+    so images are served from k-boston.org instead of blocked CDN URLs.
     Returns (success_count, fail_count).
     """
     if not all([WP_SITE, WP_USER, WP_PASS]):
@@ -104,18 +160,23 @@ def import_via_rest_api(csv_path: str) -> tuple[int, int]:
     ok, fail = 0, 0
 
     for row in rows:
-        payload = row_to_tec_payload(row)
-        if not payload.get("title") or not payload.get("start_date"):
-            log.warning(f"Skipping row with missing title/date: {row.get('Event Name')}")
+        title = row.get("Event Name", "")
+        if not title or not row.get("Event Start Date"):
+            log.warning(f"Skipping row with missing title/date: {title}")
             fail += 1
             continue
+
+        # Sideload image into WP before creating the event
+        image_id = sideload_image(row.get("Event Featured Image", ""), title, auth)
+
+        payload = row_to_tec_payload(row, image_id=image_id)
         try:
             r = requests.post(base, json=payload, auth=auth, timeout=30)
             if r.status_code in (200, 201):
-                log.info(f"✓ Imported: {payload['title']}")
+                log.info(f"✓ Imported: {title}")
                 ok += 1
             else:
-                log.warning(f"✗ Failed ({r.status_code}): {payload['title']} – {r.text[:200]}")
+                log.warning(f"✗ Failed ({r.status_code}): {title} – {r.text[:200]}")
                 fail += 1
         except Exception as exc:
             log.error(f"REST API error: {exc}")
