@@ -1,0 +1,7 @@
+.env
+output/*.csv
+!output/k-boston-events-sample.csv
+__pycache__/
+*.pyc
+.venv/
+venv/

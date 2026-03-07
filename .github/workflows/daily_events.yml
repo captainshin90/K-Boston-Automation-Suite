@@ -1,0 +1,108 @@
+name: K-Boston Daily Event Discovery
+
+on:
+  schedule:
+    # Runs every day at 6:00 AM Eastern (11:00 UTC)
+    - cron: "0 11 * * *"
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+    inputs:
+      days_ahead:
+        description: "Days ahead to collect events"
+        required: false
+        default: "60"
+      relevance_threshold:
+        description: "Minimum AI relevance score (0-100)"
+        required: false
+        default: "40"
+      import_method:
+        description: "WordPress import method"
+        required: false
+        default: "rest"
+        type: choice
+        options: [rest, ftp, csv_only]
+
+env:
+  PYTHON_VERSION: "3.12"
+  OUTPUT_DIR: output
+
+jobs:
+  discover-events:
+    name: Discover & Enrich Events
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Run event discovery ───────────────────────────────────
+      - name: Run event discovery
+        env:
+          # API Keys – store all of these in GitHub Secrets
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          EVENTBRITE_TOKEN:     ${{ secrets.EVENTBRITE_TOKEN }}
+          TICKETMASTER_KEY:     ${{ secrets.TICKETMASTER_KEY }}
+          SERPAPI_KEY:          ${{ secrets.SERPAPI_KEY }}
+          # Behavior
+          DAYS_AHEAD:           ${{ github.event.inputs.days_ahead || '60' }}
+          RELEVANCE_THRESHOLD:  ${{ github.event.inputs.relevance_threshold || '40' }}
+          OUTPUT_DIR:           ${{ env.OUTPUT_DIR }}
+        run: python src/event_discovery.py
+
+      # ── 4. Import to WordPress ───────────────────────────────────
+      - name: Import events to WordPress
+        if: ${{ github.event.inputs.import_method != 'csv_only' }}
+        env:
+          WP_SITE_URL:       ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME:       ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD:   ${{ secrets.WP_APP_PASSWORD }}
+          FTP_HOST:          ${{ secrets.FTP_HOST }}
+          FTP_USER:          ${{ secrets.FTP_USER }}
+          FTP_PASS:          ${{ secrets.FTP_PASS }}
+          FTP_REMOTE_PATH:   ${{ secrets.FTP_REMOTE_PATH }}
+        run: |
+          METHOD="${{ github.event.inputs.import_method || 'rest' }}"
+          python src/wp_importer.py --csv output/k-boston-events-latest.csv --method "$METHOD"
+
+      # ── 5. Upload CSV artifact (always) ──────────────────────────
+      - name: Upload events CSV as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k-boston-events-${{ github.run_id }}
+          path: output/
+          retention-days: 30
+
+      # ── 6. Commit CSV back to repo (optional – uncomment to enable)
+      # - name: Commit latest CSV to repo
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add output/k-boston-events-latest.csv
+      #     git diff --staged --quiet || git commit -m "chore: update events $(date +%Y-%m-%d)"
+      #     git push
+
+      # ── 7. Notify on failure ─────────────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Event discovery failed – ${new Date().toISOString().slice(0,10)}`,
+              body: `Workflow run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) failed.\n\nPlease check the logs.`,
+              labels: ['bug', 'automated']
+            })
