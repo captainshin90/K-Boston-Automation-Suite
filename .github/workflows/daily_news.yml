@@ -3,8 +3,7 @@ name: K-Boston Daily News & Video Discovery
 on:
   schedule:
     # Runs every day at 7:00 AM Eastern (12:00 UTC)
-    # - cron: "0 12 * * *"
-    - cron: "0 12 * * 0"
+    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
       days_back:
@@ -21,12 +20,12 @@ on:
         required: false
         type: choice
         options: [publish, draft]
-      dry_run:
-        description: "Dry run (discover but don't import to WordPress)"
-        default: "false"
+      mode:
+        description: "Run mode"
+        default: "normal"
         required: false
         type: choice
-        options: ["false", "true"]
+        options: [normal, dry_run, test_wp_only]
 
 env:
   PYTHON_VERSION: "3.12"
@@ -55,6 +54,7 @@ jobs:
 
       # ── Discover ─────────────────────────────────────────────────
       - name: Run news & video discovery
+        if: ${{ github.event.inputs.mode != 'test_wp_only' }}
         env:
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
           NEWSAPI_KEY:         ${{ secrets.NEWSAPI_KEY }}
@@ -65,21 +65,40 @@ jobs:
           OUTPUT_DIR:          ${{ env.OUTPUT_DIR }}
         run: python news/src/news_discovery.py
 
+      # ── WP connectivity test (run manually to debug) ─────────────
+      - name: Test WordPress connectivity
+        if: ${{ github.event.inputs.mode == 'test_wp_only' }}
+        env:
+          WP_SITE_URL:       ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME:       ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD:   ${{ secrets.WP_APP_PASSWORD }}
+          WP_NEWS_CATEGORY:  "korean-news"
+          WP_VIDEO_CATEGORY: "korean-videos"
+        run: |
+          # Create a minimal sample JSON so the importer can load it
+          mkdir -p news/output
+          echo '{"articles":[{"title":"Test","url":"https://test.com","source_name":"Test","published_at":"","description":"test","content":"test","image_url":"","author":"","tags":""}],"videos":[]}' > news/output/news-latest.json
+          python news/src/news_wp_importer.py --json news/output/news-latest.json --test
+
       # ── Import to WordPress ───────────────────────────────────────
       - name: Import to WordPress
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ github.event.inputs.mode == 'normal' || github.event.inputs.mode == '' }}
         env:
           WP_SITE_URL:       ${{ secrets.WP_SITE_URL }}
           WP_USERNAME:       ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD:   ${{ secrets.WP_APP_PASSWORD }}
           WP_POST_STATUS:    ${{ github.event.inputs.post_status || 'publish' }}
-          WP_NEWS_CATEGORY:  "news"
+          WP_NEWS_CATEGORY:  "korean-news"
           WP_VIDEO_CATEGORY: "korean-videos"
           SKIP_DUPLICATES:   "true"
         run: python news/src/news_wp_importer.py --json news/output/news-latest.json
 
       - name: Dry run preview
-        if: ${{ github.event.inputs.dry_run == 'true' }}
+        if: ${{ github.event.inputs.mode == 'dry_run' }}
+        env:
+          WP_SITE_URL:       ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME:       ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD:   ${{ secrets.WP_APP_PASSWORD }}
         run: python news/src/news_wp_importer.py --json news/output/news-latest.json --dry-run
 
       # ── Archive artifacts ─────────────────────────────────────────

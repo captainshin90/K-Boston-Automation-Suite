@@ -73,6 +73,7 @@ def wp_post_req(endpoint, payload):
             msg = r.json().get("message", r.text[:300])
         except Exception:
             msg = r.text[:300]
+        log.error(f"    FULL WP RESPONSE: {r.text[:800]}")
         raise RuntimeError(f"HTTP {r.status_code}: {msg}")
     return r.json()
 
@@ -288,17 +289,62 @@ def import_video(item, video_cat_id):
 
 
 # ─────────────────────────────────────────────
+# Connectivity test
+# ─────────────────────────────────────────────
+def run_test(articles, videos):
+    """
+    --test mode: attempt to import exactly 1 article and 1 video,
+    printing the full WP request payload and response so errors are visible.
+    """
+    log.info("══ TEST MODE – trying 1 article + 1 video ══")
+    log.info(f"WP_SITE={WP_SITE}  WP_USER={WP_USER}  PASS={'set' if WP_PASS else 'NOT SET'}")
+
+    # Verify WP REST API is reachable at all
+    try:
+        info = requests.get(f"{WP_SITE}/wp-json/wp/v2/", timeout=10).json()
+        log.info(f"WP REST API reachable ✓  (WP version: {info.get('namespaces', [])})")
+    except Exception as exc:
+        log.error(f"WP REST API NOT reachable: {exc}")
+        raise SystemExit(1)
+
+    # Minimal post payload – no tags, no image, no date
+    test_payload = {
+        "title":   "K-Boston Test Post – safe to delete",
+        "content": "<p>This is a test post created by the K-Boston news importer. Please delete it.</p>",
+        "status":  "draft",   # always draft in test mode
+    }
+    log.info(f"Test payload: {json.dumps(test_payload)}")
+    try:
+        r = requests.post(f"{WP_SITE}/wp-json/wp/v2/posts",
+                          auth=auth(), json=test_payload, timeout=20)
+        log.info(f"Response status: {r.status_code}")
+        log.info(f"Response body: {r.text[:600]}")
+        if r.ok:
+            post_id = r.json().get("id")
+            log.info(f"✓ Test post created as DRAFT (ID {post_id}) — please delete from WP Admin → Posts")
+        else:
+            log.error("✗ Test post FAILED — see response body above for the WP error")
+            raise SystemExit(1)
+    except requests.RequestException as exc:
+        log.error(f"Request error: {exc}")
+        raise SystemExit(1)
+
+
+# ─────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────
 def main():
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description="Import K-Boston news & videos to WordPress")
     parser.add_argument("--json", default="news/output/news-latest.json", help="JSON file path")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be imported without touching WordPress")
+    parser.add_argument("--test", action="store_true",
+                        help="Send a minimal test post to WP to verify credentials and connectivity")
     args = parser.parse_args()
 
-    if not args.dry_run and not all([WP_SITE, WP_USER, WP_PASS]):
+    if not all([WP_SITE, WP_USER, WP_PASS]):
         log.error("WP_SITE_URL, WP_USERNAME, WP_APP_PASSWORD are required")
         raise SystemExit(1)
 
@@ -315,6 +361,10 @@ def main():
             log.info(f"  [article] {a.get('title','')[:80]}")
         for v in videos:
             log.info(f"  [video]   {v.get('title','')[:80]}")
+        return
+
+    if args.test:
+        run_test(articles, videos)
         return
 
     news_cat_id  = get_or_create_category("Korean News",   NEWS_CATEGORY)
@@ -342,9 +392,14 @@ def main():
     log.info(f"Articles : {ok_a} imported, {fail_a} skipped/failed")
     log.info(f"Videos   : {ok_v} imported, {fail_v} skipped/failed")
     log.info(f"Find them at: {WP_SITE}/blog/")
-    log.info(f"  Korean News  → {WP_SITE}/category/{NEWS_CATEGORY}/")
+    log.info(f"  Korean News   → {WP_SITE}/category/{NEWS_CATEGORY}/")
     log.info(f"  Korean Videos → {WP_SITE}/category/{VIDEO_CATEGORY}/")
     log.info("══════════════════════════════════════════")
+
+    # Exit non-zero if everything failed (makes GitHub Actions mark step as failed)
+    if (ok_a + ok_v) == 0 and (fail_a + fail_v) > 0:
+        log.error("All posts failed to import — check errors above")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
