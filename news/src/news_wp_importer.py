@@ -24,10 +24,13 @@ Optional:
 
 import os
 import re
+import ssl
 import json
 import time
 import logging
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -127,12 +130,31 @@ def get_or_create_tags(tag_csv):
     return ids
 
 
+class _LegacySSLAdapter(HTTPAdapter):
+    """HTTPAdapter that allows legacy SSL renegotiation for older servers."""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+        kwargs["ssl_context"] = ctx
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _image_session() -> requests.Session:
+    """Return a requests session that tolerates legacy SSL (e.g. img.yna.co.kr)."""
+    s = requests.Session()
+    s.mount("https://", _LegacySSLAdapter())
+    s.headers.update(IMAGE_HEADERS)
+    return s
+
+
 def sideload_image(image_url, title):
-    """Download image from external URL and upload to WP Media Library."""
+    """Download image from external URL and upload to WP Media Library.
+    Uses a legacy-SSL-tolerant session so servers like img.yna.co.kr work."""
     if not image_url:
         return 0
     try:
-        resp = requests.get(image_url, headers=IMAGE_HEADERS, timeout=15)
+        session = _image_session()
+        resp = session.get(image_url, timeout=15)
         resp.raise_for_status()
         content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
         ext = {"image/jpeg": "jpg", "image/png": "png",

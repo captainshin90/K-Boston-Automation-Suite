@@ -16,10 +16,13 @@ Set env vars:
 import os
 import re
 import csv
+import ssl
 import json
 import logging
 import ftplib
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -48,17 +51,32 @@ def load_csv(path: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+class _LegacySSLAdapter(HTTPAdapter):
+    """HTTPAdapter that allows legacy SSL renegotiation for older servers."""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+        kwargs["ssl_context"] = ctx
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _image_session() -> requests.Session:
+    s = requests.Session()
+    s.mount("https://", _LegacySSLAdapter())
+    s.headers.update(IMAGE_HEADERS)
+    return s
+
+
 def sideload_image(image_url: str, title: str, auth: tuple) -> int:
     """
     Download image from external URL and upload to WP Media Library.
     Returns the WordPress attachment ID, or 0 on failure.
-    External CDNs (Eventbrite, Ticketmaster) block hotlinking, so we
-    download the image server-side and re-host it in WordPress.
+    Uses a legacy-SSL-tolerant session to handle older CDN servers.
     """
     if not image_url:
         return 0
     try:
-        resp = requests.get(image_url, headers=IMAGE_HEADERS, timeout=15)
+        resp = _image_session().get(image_url, timeout=15)
         resp.raise_for_status()
 
         content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
