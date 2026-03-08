@@ -1,7 +1,9 @@
 .env
 NOTES_PRIVATE.md
-output/*.csv
-!output/k-boston-events-sample.csv
+events/output/*.csv
+news/output/*.json
+!events/output/k-boston-events-sample.csv
+!news/output/news-sample.json
 __pycache__/
 *.pyc
 .venv/
