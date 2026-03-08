@@ -63,7 +63,7 @@ jobs:
           DAYS_BACK:           ${{ github.event.inputs.days_back || '3' }}
           RELEVANCE_THRESHOLD: ${{ github.event.inputs.relevance_threshold || '45' }}
           OUTPUT_DIR:          ${{ env.OUTPUT_DIR }}
-        run: # python news/src/news_discovery.py - skip for now to test import to WUP
+        run: python news/src/news_discovery.py 
 
       # ── WP connectivity test (run manually to debug) ─────────────
       - name: Test WordPress connectivity
