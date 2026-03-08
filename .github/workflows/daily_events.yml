@@ -21,6 +21,12 @@ on:
         default: "rest"
         type: choice
         options: [rest, ftp, csv_only]
+      ai_enrichment:
+        description: "Enable Claude AI relevance scoring"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
 env:
   PYTHON_VERSION: "3.12"
@@ -60,6 +66,7 @@ jobs:
           # Behavior
           DAYS_AHEAD:           ${{ github.event.inputs.days_ahead || '60' }}
           RELEVANCE_THRESHOLD:  ${{ github.event.inputs.relevance_threshold || '40' }}
+          AI_ENRICHMENT:        ${{ github.event.inputs.ai_enrichment || 'false' }}
           OUTPUT_DIR:           ${{ env.OUTPUT_DIR }}
         run: python events/src/event_discovery.py
 

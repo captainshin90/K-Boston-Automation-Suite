@@ -768,14 +768,16 @@ def main():
 
     log.info(f"Total candidates before AI filter: {len(all_events)}")
 
-    # AI enrichment temporarily disabled for faster/cheaper testing.
-    # To re-enable, replace the next 3 lines with:
-    #   enricher = ClaudeEnricher()
-    #   filtered = enricher.enrich(all_events)
-    for ev in all_events:
-        ev.relevance_score = 50
-    filtered = all_events
-    log.info(f"AI enrichment OFF – passing all {len(filtered)} keyword-matched events through")
+    # AI enrichment – controlled by AI_ENRICHMENT env var (default: off)
+    if os.getenv("AI_ENRICHMENT", "false").lower() == "true":
+        enricher = ClaudeEnricher()
+        filtered = enricher.enrich(all_events)
+        log.info(f"AI enrichment ON – {len(filtered)} events passed threshold")
+    else:
+        for ev in all_events:
+            ev.relevance_score = 50
+        filtered = all_events
+        log.info(f"AI enrichment OFF – passing all {len(filtered)} keyword-matched events through")
 
     # De-duplicate
     final = deduplicate(filtered)
