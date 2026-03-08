@@ -1,4 +1,5 @@
 .env
+NOTES_PRIVATE.md
 output/*.csv
 !output/k-boston-events-sample.csv
 __pycache__/
