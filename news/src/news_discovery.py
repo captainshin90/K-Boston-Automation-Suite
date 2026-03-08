@@ -649,8 +649,14 @@ def main():
 
     log.info(f"Total article candidates: {len(raw_articles)}")
 
-    enricher = ClaudeEnricher()
-    articles = dedup_articles(enricher.enrich_articles(raw_articles))
+    # AI enrichment temporarily disabled for faster/cheaper testing.
+    # To re-enable, replace this block with:
+    #   enricher = ClaudeEnricher()
+    #   articles = dedup_articles(enricher.enrich_articles(raw_articles))
+    for a in raw_articles:
+        a.relevance = 50
+    articles = dedup_articles(raw_articles)
+    log.info(f"AI enrichment OFF – passing all {len(articles)} articles through")
 
     # ── Videos ───────────────────────────────
     raw_videos: list[Video] = []
@@ -660,7 +666,11 @@ def main():
         log.error(f"YouTubeSource failed: {exc}")
 
     log.info(f"Total video candidates: {len(raw_videos)}")
-    videos = dedup_videos(enricher.enrich_videos(raw_videos))
+    # To re-enable AI: videos = dedup_videos(enricher.enrich_videos(raw_videos))
+    for v in raw_videos:
+        v.relevance = 50
+    videos = dedup_videos(raw_videos)
+    log.info(f"AI enrichment OFF – passing all {len(videos)} videos through")
 
     # ── Write outputs ─────────────────────────
     out = os.getenv("OUTPUT_DIR", "output")
